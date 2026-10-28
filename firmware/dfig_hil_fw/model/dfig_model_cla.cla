@@ -1,0 +1,203 @@
+/* Full 4th-order DFIG plant model, CLA task 1.
+ *
+ * Direct port of python/dfig_hil/dfig_full.py (DfigFullModel.step), the
+ * model chosen over the PRD's simplified Sec 5.2 two-state model per the
+ * handoff finding (bare Sec 5.2 fails acceptance test A3 by 20-31%; this
+ * one is validated against the 10 us RK4 reference in the Python suite,
+ * all 82 tests passing as of this port).
+ *
+ * Two complex states (psi_s, psi_r) held as four floats, trapezoidal rule
+ * at the 100 us frame, explicit 2x2 complex solve by Cramer's rule -- no
+ * division inside a loop, no matrix library, so this maps onto the CLA's
+ * restricted instruction set the same way the Python module was written
+ * to allow for.
+ *
+ * Pipelining: this task is triggered once per 10 kHz CPU timer ISR
+ * (main.c) and runs concurrently with the C28x control code for the rest
+ * of that frame. The CPU reads cla_out_* at the TOP of the following
+ * frame, i.e. control sees the model output delayed by one 100 us frame.
+ * This is the normal way CLA/C28x parallelism is used (see C2000Ware's
+ * own cla examples) and is itself just a one-step discrete-time delay in
+ * a system already discretized at 100 us -- not a bug, but it must be
+ * accounted for when the comparison harness lines this up against the
+ * Python reference, which has no such pipeline stage.
+ *
+ * STATUS: compiles against the CLA C subset; NOT YET validated against
+ * the Python reference frame-by-frame (that comparison harness is the
+ * next step -- see DFIG_HANDOFF.md next-steps list, item 4). Treat the
+ * numeric output as unverified until that harness confirms a match.
+ * The Python model's NaN-recovery branch (self.fault = FAULT_NAN,
+ * restart) is also not yet ported -- TODO.
+ */
+
+#include "dfig_params.h"
+
+/* All CLA task inputs/outputs live in Cla1DataRam: on F28004x this RAM
+ * block can be mastered by the CLA while still being readable/writable
+ * by the CPU between CLA task invocations (same pattern C2000Ware's own
+ * cla_ex1_background_task uses for its shared buffer). */
+
+#pragma DATA_SECTION(cla_in_v_rd, "Cla1DataRam")
+#pragma DATA_SECTION(cla_in_v_rq, "Cla1DataRam")
+#pragma DATA_SECTION(cla_in_v_s,  "Cla1DataRam")
+#pragma DATA_SECTION(cla_in_w_m,  "Cla1DataRam")
+float cla_in_v_rd;   /* rotor d-axis voltage command, V (referred)        */
+float cla_in_v_rq;   /* rotor q-axis voltage command, V (referred)        */
+float cla_in_v_s;    /* stator supply voltage, V peak phase               */
+float cla_in_w_m;    /* mechanical speed, rad/s (from encoder M-method)   */
+
+#pragma DATA_SECTION(cla_out_i_rd, "Cla1DataRam")
+#pragma DATA_SECTION(cla_out_i_rq, "Cla1DataRam")
+#pragma DATA_SECTION(cla_out_p_s,  "Cla1DataRam")
+#pragma DATA_SECTION(cla_out_q_s,  "Cla1DataRam")
+#pragma DATA_SECTION(cla_out_t_e,  "Cla1DataRam")
+#pragma DATA_SECTION(cla_out_fault, "Cla1DataRam")
+float cla_out_i_rd;
+float cla_out_i_rq;
+float cla_out_p_s;
+float cla_out_q_s;
+float cla_out_t_e;
+int16_t cla_out_fault;   /* 0 = none, 1 = clamp */
+
+#pragma DATA_SECTION(psd, "Cla1DataRam")
+#pragma DATA_SECTION(psq, "Cla1DataRam")
+#pragma DATA_SECTION(prd, "Cla1DataRam")
+#pragma DATA_SECTION(prq, "Cla1DataRam")
+#pragma DATA_SECTION(cla_started, "Cla1DataRam")
+float psd, psq, prd, prq;
+int16_t cla_started;
+
+/* Fixed model coefficients, computed once in cla_model_init() (task 7,
+ * the usual CLA one-time-init task) from dfig_params.h. The per-frame
+ * task (task 1) never divides. */
+#pragma DATA_SECTION(m11r, "Cla1DataRam")
+#pragma DATA_SECTION(m12,  "Cla1DataRam")
+#pragma DATA_SECTION(m21,  "Cla1DataRam")
+#pragma DATA_SECTION(m22r, "Cla1DataRam")
+#pragma DATA_SECTION(inv_det_lm, "Cla1DataRam")
+float m11r, m12, m21, m22r;
+float inv_det_lm;   /* 1 / (l_s*l_r - l_m*l_m) */
+
+#define FAULT_NONE  0
+#define FAULT_CLAMP 1
+
+/* CLA task 7: one-time init, forced from the CPU side at startup (same
+ * slot C2000Ware's cla examples use for this purpose). Mirrors
+ * DfigFullModel.__init__ / reset() in dfig_full.py. */
+__attribute__((interrupt)) void Cla1Task7(void)
+{
+    float l_s = DFIG_D_L_S;
+    float l_r = DFIG_D_L_R;
+    float l_m = DFIG_L_M;
+    float r_s = DFIG_R_S;
+    float r_r = DFIG_R_R;
+    float inv_det = 1.0f / (l_s * l_r - l_m * l_m);
+
+    m11r = -r_s * l_r * inv_det;
+    m12  =  r_s * l_m * inv_det;
+    m21  =  r_r * l_m * inv_det;
+    m22r = -r_r * l_s * inv_det;
+    inv_det_lm = inv_det;
+
+    psd = psq = prd = prq = 0.0f;
+    cla_started = 0;
+    cla_out_fault = FAULT_NONE;
+}
+
+/* CLA task 1: one 100 us frame. Mirrors DfigFullModel.step(). Triggered
+ * from the C28x CPU timer ISR at 10 kHz (main.c). */
+__attribute__((interrupt)) void Cla1Task1(void)
+{
+    float w_s = DFIG_D_W_S;
+    float l_s = DFIG_D_L_S;
+    float l_r = DFIG_D_L_R;
+    float l_m = DFIG_L_M;
+    float h   = DFIG_DT;
+    float hh  = 0.5f * h;
+    float pp  = DFIG_POLE_PAIRS;
+
+    float v_rd = cla_in_v_rd;
+    float v_rq = cla_in_v_rq;
+    float v_s  = cla_in_v_s;
+    float w_m  = cla_in_w_m;
+
+    float s, w_sl;
+    float a11r, a11i, a12, a21, a22r, a22i;
+    float b11r, b11i, b22r, b22i;
+    float r1r, r1i, r2r, r2i;
+    float dr, di, k;
+    float nr, ni;
+    float new_psd, new_psq, new_prd, new_prq;
+    float i_rd, i_rq, i_sq, i_sd;
+
+    /* energise into the no-load steady state on the first frame, same as
+     * DfigFullModel._start(): i_s = j*v_s / (r_s + j*w_s*l_s), psi from i_s */
+    if (cla_started == 0)
+    {
+        float r_s = DFIG_R_S;
+        float denom = r_s * r_s + (w_s * l_s) * (w_s * l_s);
+        float i_s_re = -w_s * l_s * v_s / denom;
+        float i_s_im =  r_s * v_s / denom;
+        psd = l_s * i_s_re;
+        psq = l_s * i_s_im;
+        prd = l_m * i_s_re;
+        prq = l_m * i_s_im;
+        cla_started = 1;
+    }
+
+    s = (w_s - w_m * pp) / w_s;
+    w_sl = s * w_s;
+
+    a11r = 1.0f - hh * m11r;  a11i =  hh * w_s;
+    a12  = -hh * m12;
+    a21  = -hh * m21;
+    a22r = 1.0f - hh * m22r;  a22i =  hh * w_sl;
+    b11r = 1.0f + hh * m11r;  b11i = -hh * w_s;
+    b22r = 1.0f + hh * m22r;  b22i = -hh * w_sl;
+
+    r1r = b11r * psd - b11i * psq + hh * m12 * prd;
+    r1i = b11r * psq + b11i * psd + hh * m12 * prq + h * v_s;
+    r2r = b22r * prd - b22i * prq + hh * m21 * psd + h * v_rd;
+    r2i = b22r * prq + b22i * prd + hh * m21 * psq + h * v_rq;
+
+    dr = a11r * a22r - a11i * a22i - a12 * a21;
+    di = a11r * a22i + a11i * a22r;
+    k  = 1.0f / (dr * dr + di * di);
+
+    nr = r1r * a22r - r1i * a22i - a12 * r2r;
+    ni = r1r * a22i + r1i * a22r - a12 * r2i;
+    new_psd = (nr * dr + ni * di) * k;
+    new_psq = (ni * dr - nr * di) * k;
+
+    nr = a11r * r2r - a11i * r2i - a21 * r1r;
+    ni = a11r * r2i + a11i * r2r - a21 * r1i;
+    new_prd = (nr * dr + ni * di) * k;
+    new_prq = (ni * dr - nr * di) * k;
+
+    i_rd = (l_s * new_prd - l_m * new_psd) * inv_det_lm;
+    i_rq = (l_s * new_prq - l_m * new_psq) * inv_det_lm;
+
+    if (i_rd > DFIG_D_I_GUARD || i_rd < -DFIG_D_I_GUARD ||
+        i_rq > DFIG_D_I_GUARD || i_rq < -DFIG_D_I_GUARD)
+    {
+        cla_out_fault = FAULT_CLAMP;
+    }
+    else
+    {
+        cla_out_fault = FAULT_NONE;
+    }
+
+    psd = new_psd;  psq = new_psq;
+    prd = new_prd;  prq = new_prq;
+
+    i_sd = (l_r * psd - l_m * prd) * inv_det_lm;
+    i_sq = (l_r * psq - l_m * prq) * inv_det_lm;
+    i_rd = (l_s * prd - l_m * psd) * inv_det_lm;
+    i_rq = (l_s * prq - l_m * psq) * inv_det_lm;
+
+    cla_out_i_rd = i_rd;
+    cla_out_i_rq = i_rq;
+    cla_out_p_s  = 1.5f * v_s * i_sq;
+    cla_out_q_s  = 1.5f * v_s * i_sd;
+    cla_out_t_e  = 1.5f * pp * (psd * i_sq - psq * i_sd);
+}

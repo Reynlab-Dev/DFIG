@@ -116,6 +116,15 @@ def rotor_to_actual_current(i_referred, p=DEFAULT):
     return i_referred / p.turns_ratio
 
 
+def _c_float_literal(v):
+    """A C floating-constant always needs a '.' or exponent before the
+    'f' suffix ("415f" is not valid C; "415.0f" is)."""
+    s = f"{float(v):.9g}"
+    if "." not in s and "e" not in s and "E" not in s:
+        s += ".0"
+    return s + "f"
+
+
 def write_c_header(p=DEFAULT, path=None):
     """Emit the parameter set as `dfig_params.h` text (float literals)."""
     lines = [
@@ -126,10 +135,10 @@ def write_c_header(p=DEFAULT, path=None):
         "",
     ]
     for k, v in p.as_dict().items():
-        lines.append(f"#define DFIG_{k.upper():<20s} ({float(v):.9g}f)")
+        lines.append(f"#define DFIG_{k.upper():<20s} ({_c_float_literal(v)})")
     lines.append("")
     for k, v in p.derived().items():
-        lines.append(f"#define DFIG_D_{k.upper():<18s} ({float(v):.9g}f)")
+        lines.append(f"#define DFIG_D_{k.upper():<18s} ({_c_float_literal(v)})")
     lines += ["", "#endif"]
     text = "\n".join(lines) + "\n"
     if path:
