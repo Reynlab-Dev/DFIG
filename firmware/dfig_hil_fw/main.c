@@ -123,8 +123,12 @@ __interrupt void cpuTimer0ISR(void)
 
     // Step 2 [TODO, /control]: Park/Clarke + PI + inverse Park/SVPWM on
     // g_plant_feedback -> v_rd_cmd, v_rq_cmd. Zero for now.
+    //
+    // w_s is nominal grid frequency until grid_events.c (sag/swell/freq
+    // deviation injection, PRD Sec 6.4) is ported -- TODO.
     dfig_cla_trigger_inputs(/*v_rd=*/0.0f, /*v_rq=*/0.0f,
-                             /*v_s=*/DFIG_D_V_S_PK_RATED, /*w_m=*/w_m_meas);
+                             /*v_s=*/DFIG_D_V_S_PK_RATED,
+                             /*w_s=*/DFIG_D_W_S, /*w_m=*/w_m_meas);
 
     // Step 3: re-trigger the CLA task for next frame's result.
     Cla1Regs.MIFRC.bit.INT1 = 1;

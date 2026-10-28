@@ -30,7 +30,7 @@ extern "C" {
  * plant_iface_adc() with this same signature, selected by the E14 key
  * switch per PRD Sec 6.5; /control never changes. */
 void plant_iface_model(plant_feedback_t *fb, float w_m);
-void dfig_cla_trigger_inputs(float v_rd, float v_rq, float v_s, float w_m);
+void dfig_cla_trigger_inputs(float v_rd, float v_rq, float v_s, float w_s, float w_m);
 
 #ifdef __cplusplus
 }

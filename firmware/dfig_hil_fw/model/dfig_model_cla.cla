@@ -40,10 +40,14 @@
 #pragma DATA_SECTION(cla_in_v_rd, "Cla1DataRam")
 #pragma DATA_SECTION(cla_in_v_rq, "Cla1DataRam")
 #pragma DATA_SECTION(cla_in_v_s,  "Cla1DataRam")
+#pragma DATA_SECTION(cla_in_w_s,  "Cla1DataRam")
 #pragma DATA_SECTION(cla_in_w_m,  "Cla1DataRam")
 float cla_in_v_rd;   /* rotor d-axis voltage command, V (referred)        */
 float cla_in_v_rq;   /* rotor q-axis voltage command, V (referred)        */
 float cla_in_v_s;    /* stator supply voltage, V peak phase               */
+float cla_in_w_s;    /* grid angular frequency, rad/s (nominal unless a   */
+                      /* frequency-deviation event is active -- matches   */
+                      /* dfig_full.py's step(..., w_s, ...) signature)    */
 float cla_in_w_m;    /* mechanical speed, rad/s (from encoder M-method)   */
 
 #pragma DATA_SECTION(cla_out_i_rd, "Cla1DataRam")
@@ -102,13 +106,17 @@ __attribute__((interrupt)) void Cla1Task7(void)
     psd = psq = prd = prq = 0.0f;
     cla_started = 0;
     cla_out_fault = FAULT_NONE;
+
+    /* sane default until the CPU side writes a real value (grid model
+     * not ported yet -- see dfig_cla_trigger_inputs() in main.c) */
+    cla_in_w_s = DFIG_D_W_S;
 }
 
 /* CLA task 1: one 100 us frame. Mirrors DfigFullModel.step(). Triggered
  * from the C28x CPU timer ISR at 10 kHz (main.c). */
 __attribute__((interrupt)) void Cla1Task1(void)
 {
-    float w_s = DFIG_D_W_S;
+    float w_s = cla_in_w_s;
     float l_s = DFIG_D_L_S;
     float l_r = DFIG_D_L_R;
     float l_m = DFIG_L_M;
@@ -136,8 +144,8 @@ __attribute__((interrupt)) void Cla1Task1(void)
     {
         float r_s = DFIG_R_S;
         float denom = r_s * r_s + (w_s * l_s) * (w_s * l_s);
-        float i_s_re = -w_s * l_s * v_s / denom;
-        float i_s_im =  r_s * v_s / denom;
+        float i_s_re = w_s * l_s * v_s / denom;   /* was negated -- bug, caught by the comparison harness */
+        float i_s_im = r_s * v_s / denom;
         psd = l_s * i_s_re;
         psq = l_s * i_s_im;
         prd = l_m * i_s_re;

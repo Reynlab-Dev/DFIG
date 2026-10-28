@@ -33,7 +33,7 @@ static float wrap_pi(float theta)
  * frame's CLA trigger -- see dfig_cla_trigger() below. */
 void plant_iface_model(plant_feedback_t *fb, float w_m)
 {
-    float w_s   = DFIG_D_W_S;
+    float w_s   = cla_in_w_s;   /* same grid frequency the CLA task used */
     float pp    = DFIG_POLE_PAIRS;
     float slip  = (w_s - w_m * pp) / w_s;
     float w_sl  = slip * w_s;
@@ -66,10 +66,11 @@ void plant_iface_model(plant_feedback_t *fb, float w_m)
 /* Called once per 10 kHz frame, before the CLA task is (re-)triggered
  * for the frame after next. v_rd/v_rq are this frame's rotor voltage
  * command from the control code's inverse Park/SVPWM stage. */
-void dfig_cla_trigger_inputs(float v_rd, float v_rq, float v_s, float w_m)
+void dfig_cla_trigger_inputs(float v_rd, float v_rq, float v_s, float w_s, float w_m)
 {
     cla_in_v_rd = v_rd;
     cla_in_v_rq = v_rq;
     cla_in_v_s  = v_s;
+    cla_in_w_s  = w_s;
     cla_in_w_m  = w_m;
 }

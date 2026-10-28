@@ -15,6 +15,7 @@ extern "C" {
 extern float cla_in_v_rd;
 extern float cla_in_v_rq;
 extern float cla_in_v_s;
+extern float cla_in_w_s;
 extern float cla_in_w_m;
 
 /* CLA -> CPU outputs. Read by the C28x ISR at the top of the *next*
