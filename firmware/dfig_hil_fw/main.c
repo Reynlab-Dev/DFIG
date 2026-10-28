@@ -34,8 +34,21 @@ extern uint32_t Cla1ProgRunStart, Cla1ProgLoadStart, Cla1ProgLoadSize;
 static plant_feedback_t g_plant_feedback;
 static volatile uint32_t g_frame_count = 0;
 
+// Debug-only timing instrumentation, for scope/logic-analyzer measurement
+// once this runs on real hardware -- no simulator or hardware is available
+// to this session, so this is deliberately NOT a claimed/measured number
+// anywhere in the repo; GPIO16 traces the CPU-side ISR (the "control"
+// budget), GPIO17 traces the CLA task's actual duration (the "model"
+// budget). Both are boosterpack header pins, scope-probeable without
+// disturbing anything else on the LaunchPad. Remove once real numbers
+// are in and this is no longer needed.
+#define DEBUG_GPIO_ISR   16
+#define DEBUG_GPIO_CLA   17
+
 static void initCLA(void);
+static void initDebugGpio(void);
 __interrupt void cpuTimer0ISR(void);
+__interrupt void cla1Task1DoneISR(void);
 
 void main(void)
 {
@@ -49,8 +62,10 @@ void main(void)
 
     EALLOW;
     PieVectTable.TIMER0_INT = &cpuTimer0ISR;
+    PieVectTable.CLA1_1_INT = &cla1Task1DoneISR;
     EDIS;
 
+    initDebugGpio();
     initCLA();
 
     InitCpuTimers();
@@ -59,8 +74,10 @@ void main(void)
     ConfigCpuTimer(&CpuTimer0, 100, 100);
     CpuTimer0Regs.TCR.all = 0x4000;   // start timer 0
 
-    PieCtrlRegs.PIEIER1.bit.INTx7 = 1;
+    PieCtrlRegs.PIEIER1.bit.INTx7 = 1;   // TIMER0
+    PieCtrlRegs.PIEIER11.bit.INTx1 = 1;  // CLA1_1 (task 1 end-of-task, debug only)
     IER |= M_INT1;
+    IER |= M_INT11;
 
     EINT;
     ERTM;
@@ -69,6 +86,18 @@ void main(void)
     {
         // Idle. All real-time work happens in cpuTimer0ISR / the CLA task.
     }
+}
+
+static void initDebugGpio(void)
+{
+    EALLOW;
+    GPIO_SetupPinMux(DEBUG_GPIO_ISR, GPIO_MUX_CPU1, 0);
+    GPIO_SetupPinOptions(DEBUG_GPIO_ISR, GPIO_OUTPUT, GPIO_PUSHPULL);
+    GPIO_SetupPinMux(DEBUG_GPIO_CLA, GPIO_MUX_CPU1, 0);
+    GPIO_SetupPinOptions(DEBUG_GPIO_CLA, GPIO_OUTPUT, GPIO_PUSHPULL);
+    GpioDataRegs.GPACLEAR.bit.GPIO16 = 1;
+    GpioDataRegs.GPACLEAR.bit.GPIO17 = 1;
+    EDIS;
 }
 
 static void initCLA(void)
@@ -109,6 +138,8 @@ __interrupt void cpuTimer0ISR(void)
 {
     float w_m_meas;
 
+    GpioDataRegs.GPASET.bit.GPIO16 = 1;   // debug: ISR start
+
     CpuTimer0.InterruptCount++;
     g_frame_count++;
 
@@ -131,7 +162,19 @@ __interrupt void cpuTimer0ISR(void)
                              /*w_s=*/DFIG_D_W_S, /*w_m=*/w_m_meas);
 
     // Step 3: re-trigger the CLA task for next frame's result.
+    GpioDataRegs.GPASET.bit.GPIO17 = 1;   // debug: CLA task start
     Cla1Regs.MIFRC.bit.INT1 = 1;
 
+    GpioDataRegs.GPACLEAR.bit.GPIO16 = 1; // debug: ISR end (CPU-side/"control" budget)
     PieCtrlRegs.PIEACK.bit.ACK1 = 1;
+}
+
+// Debug only: fires when the CLA finishes task 1. The pulse width on
+// GPIO17 (set in cpuTimer0ISR above, cleared here) is the CLA model's
+// actual per-frame execution time -- the number to compare against the
+// ~25 us model budget from DFIG_HANDOFF.md, once this runs on hardware.
+__interrupt void cla1Task1DoneISR(void)
+{
+    GpioDataRegs.GPACLEAR.bit.GPIO17 = 1;
+    PieCtrlRegs.PIEACK.bit.ACK11 = 1;
 }
