@@ -24,7 +24,7 @@ extern float cla_out_i_rq;
 extern float cla_out_p_s;
 extern float cla_out_q_s;
 extern float cla_out_t_e;
-extern int16_t cla_out_fault;
+extern int cla_out_fault;   /* 0 = none, 1 = clamp -- plain int to match the .cla side */
 
 /* CLA tasks, defined in dfig_model_cla.cla */
 __attribute__((interrupt)) void Cla1Task1(void);

@@ -57,7 +57,7 @@ float cla_out_i_rq;
 float cla_out_p_s;
 float cla_out_q_s;
 float cla_out_t_e;
-int16_t cla_out_fault;   /* 0 = none, 1 = clamp */
+int cla_out_fault;   /* 0 = none, 1 = clamp -- plain int, CLA C has no stdint.h */
 
 #pragma DATA_SECTION(psd, "Cla1DataRam")
 #pragma DATA_SECTION(psq, "Cla1DataRam")
@@ -65,7 +65,7 @@ int16_t cla_out_fault;   /* 0 = none, 1 = clamp */
 #pragma DATA_SECTION(prq, "Cla1DataRam")
 #pragma DATA_SECTION(cla_started, "Cla1DataRam")
 float psd, psq, prd, prq;
-int16_t cla_started;
+int cla_started;
 
 /* Fixed model coefficients, computed once in cla_model_init() (task 7,
  * the usual CLA one-time-init task) from dfig_params.h. The per-frame
