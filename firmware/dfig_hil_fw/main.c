@@ -47,6 +47,9 @@ static volatile uint32_t g_frame_count = 0;
 
 static void initCLA(void);
 static void initDebugGpio(void);
+static void initHeartbeatSci(void);
+static void sciPutString(const char *s);
+static void sciPutU32(uint32_t v);
 __interrupt void cpuTimer0ISR(void);
 __interrupt void cla1Task1DoneISR(void);
 
@@ -66,6 +69,7 @@ void main(void)
     EDIS;
 
     initDebugGpio();
+    initHeartbeatSci();
     initCLA();
 
     InitCpuTimers();
@@ -82,9 +86,88 @@ void main(void)
     EINT;
     ERTM;
 
+    // Debug only: prints g_frame_count over the XDS110's own USB-serial
+    // bridge (SCI-A, GPIO28/29 -> onboard "Application/User UART" COM
+    // port) once per second, so the running firmware can be confirmed
+    // alive without a scope/logic analyzer and without disturbing state
+    // over JTAG (a JTAG connect forces this device's DCSM security-init,
+    // which resets the core -- this path sidesteps that entirely).
+    // Remove once a scope is available and GPIO16/17 are used instead.
+    uint32_t next_print = 10000;
     for (;;)
     {
-        // Idle. All real-time work happens in cpuTimer0ISR / the CLA task.
+        if (g_frame_count >= next_print)
+        {
+            sciPutString("frame_count=");
+            sciPutU32(g_frame_count);
+            sciPutString("\r\n");
+            next_print = g_frame_count + 10000;
+        }
+    }
+}
+
+static void initHeartbeatSci(void)
+{
+    EALLOW;
+    GPIO_SetupPinMux(28, GPIO_MUX_CPU1, 1);   // GPIO28 = SCIRXDA
+    GPIO_SetupPinOptions(28, GPIO_INPUT, GPIO_PUSHPULL);
+    GPIO_SetupPinMux(29, GPIO_MUX_CPU1, 1);   // GPIO29 = SCITXDA
+    GPIO_SetupPinOptions(29, GPIO_OUTPUT, GPIO_ASYNC);
+    EDIS;
+
+    SciaRegs.SCICCR.all = 0x0007;             // 1 stop bit, no loopback, 8-bit
+    SciaRegs.SCICTL1.all = 0x0003;            // enable TX, RX, idle-line mode
+    SciaRegs.SCICTL2.all = 0x0003;
+
+    // 9600 baud at LSPCLK = SYSCLKOUT/4 = 25 MHz (default InitSysCtrl PLL
+    // config + default LOSPCP divider).
+    SciaRegs.SCIHBAUD.all = 0x0001;
+    SciaRegs.SCILBAUD.all = 0x0044;
+
+    SciaRegs.SCICTL1.all = 0x0023;            // relinquish SCI from reset
+
+    SciaRegs.SCIFFTX.all = 0xE040;
+    SciaRegs.SCIFFRX.all = 0x2044;
+    SciaRegs.SCIFFCT.all = 0x0;
+}
+
+static void sciPutString(const char *s)
+{
+    while (*s != '\0')
+    {
+        while (SciaRegs.SCIFFTX.bit.TXFFST != 0)
+        {
+            // wait for space in the TX FIFO
+        }
+        SciaRegs.SCITXBUF.all = (uint16_t)*s;
+        s++;
+    }
+}
+
+static void sciPutU32(uint32_t v)
+{
+    char digits[11];
+    int i = 0;
+
+    if (v == 0)
+    {
+        sciPutString("0");
+        return;
+    }
+
+    while (v > 0 && i < 10)
+    {
+        digits[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+
+    while (i > 0)
+    {
+        char c[2];
+        i--;
+        c[0] = digits[i];
+        c[1] = '\0';
+        sciPutString(c);
     }
 }
 
